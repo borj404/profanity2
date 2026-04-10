@@ -7,8 +7,8 @@
 #include <sstream>
 #include <iomanip>
 #include <random>
-#include <thread>
 #include <algorithm>
+#include <cstring>
 
 #if defined(__APPLE__) || defined(__MACOSX)
 #include <machine/endian.h>
@@ -73,33 +73,147 @@ static std::string toHex(const uint8_t * const s, const size_t len) {
 	return r;
 }
 
-static void printResult(cl_ulong4 seed, cl_ulong round, result r, cl_uchar score, const std::chrono::time_point<std::chrono::steady_clock> & timeStart, const Mode & mode) {
-	// Time delta
-	const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - timeStart).count();
-
-	// Format private key
+static std::string formatPrivateKey(cl_ulong4 seed, cl_ulong round, cl_uint foundId) {
 	cl_ulong carry = 0;
 	cl_ulong4 seedRes;
 
 	seedRes.s[0] = seed.s[0] + round; carry = seedRes.s[0] < round;
 	seedRes.s[1] = seed.s[1] + carry; carry = !seedRes.s[1];
 	seedRes.s[2] = seed.s[2] + carry; carry = !seedRes.s[2];
-	seedRes.s[3] = seed.s[3] + carry + r.foundId;
+	seedRes.s[3] = seed.s[3] + carry + foundId;
 
 	std::ostringstream ss;
 	ss << std::hex << std::setfill('0');
 	ss << std::setw(16) << seedRes.s[3] << std::setw(16) << seedRes.s[2] << std::setw(16) << seedRes.s[1] << std::setw(16) << seedRes.s[0];
-	const std::string strPrivate = ss.str();
+
+	return ss.str();
+}
+
+static void printResult(cl_ulong4 seed, cl_ulong round, result r, cl_uchar score, const std::chrono::time_point<std::chrono::steady_clock> & timeStart, const Mode & mode) {
+	// Time delta
+	const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - timeStart).count();
+
+	// Format private key
+	const std::string strPrivate = formatPrivateKey(seed, round, r.foundId);
 
 	// Format public key
 	const std::string strPublic = toHex(r.foundHash, 20);
 
 	// Print
 	const std::string strVT100ClearLine = "\33[2K\r";
-	std::cout << strVT100ClearLine << "  Time: " << std::setw(5) << seconds << "s Score: " << std::setw(2) << (int) score << " Private: 0x" << strPrivate << ' ';
+	std::cout << strVT100ClearLine << "  Time: " << std::setw(5) << seconds << "s";
 
+	if (!mode.isMatchAll) {
+		std::cout << " Score: " << std::setw(2) << (int) score;
+	}
+
+	std::cout << " Private: 0x" << strPrivate << ' ';
 	std::cout << mode.transformName();
 	std::cout << ": 0x" << strPublic << std::endl;
+}
+
+// Keccak-256 for EIP-55 checksum postprocessing
+
+static const uint64_t keccakRC[24] = {
+	0x0000000000000001ULL, 0x0000000000008082ULL, 0x800000000000808aULL,
+	0x8000000080008000ULL, 0x000000000000808bULL, 0x0000000080000001ULL,
+	0x8000000080008081ULL, 0x8000000000008009ULL, 0x000000000000008aULL,
+	0x0000000000000088ULL, 0x0000000080008009ULL, 0x000000008000000aULL,
+	0x000000008000808bULL, 0x800000000000008bULL, 0x8000000000008089ULL,
+	0x8000000000008003ULL, 0x8000000000008002ULL, 0x8000000000000080ULL,
+	0x000000000000800aULL, 0x800000008000000aULL, 0x8000000080008081ULL,
+	0x8000000000008080ULL, 0x0000000080000001ULL, 0x8000000080008008ULL
+};
+
+static const int keccakRho[24] = { 1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14, 27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44 };
+static const int keccakPi[24]  = { 10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4, 15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1 };
+
+static uint64_t rotl64(uint64_t x, int n) {
+	return (x << n) | (x >> (64 - n));
+}
+
+static void keccakF1600(uint64_t st[25]) {
+	for (uint64_t round : keccakRC) {
+		uint64_t C[5], D[5];
+		for (int x = 0; x < 5; ++x) C[x] = st[x] ^ st[x+5] ^ st[x+10] ^ st[x+15] ^ st[x+20];
+		for (int x = 0; x < 5; ++x) D[x] = C[(x+4)%5] ^ rotl64(C[(x+1)%5], 1);
+		for (int i = 0; i < 25; ++i) st[i] ^= D[i%5];
+
+		uint64_t tmp = st[1];
+		for (int i = 0; i < 24; ++i) {
+			int j = keccakPi[i];
+			uint64_t t = st[j];
+			st[j] = rotl64(tmp, keccakRho[i]);
+			tmp = t;
+		}
+
+		for (int y = 0; y < 25; y += 5) {
+			uint64_t t[5];
+			for (int x = 0; x < 5; ++x) t[x] = st[y+x];
+			for (int x = 0; x < 5; ++x) st[y+x] = t[x] ^ (~t[(x+1)%5] & t[(x+2)%5]);
+		}
+
+		st[0] ^= round;
+	}
+}
+
+static void keccak256(const uint8_t * input, size_t len, uint8_t output[32]) {
+	uint64_t st[25] = {0};
+	const size_t rate = 136;
+	size_t offset = 0;
+
+	while (len - offset >= rate) {
+		for (size_t i = 0; i < rate / 8; ++i) {
+			uint64_t t = 0;
+			memcpy(&t, input + offset + i * 8, 8);
+			st[i] ^= t;
+		}
+		keccakF1600(st);
+		offset += rate;
+	}
+
+	uint8_t temp[136] = {0};
+	memcpy(temp, input + offset, len - offset);
+	temp[len - offset] = 0x01;
+	temp[rate - 1] ^= 0x80;
+
+	for (size_t i = 0; i < rate / 8; ++i) {
+		uint64_t t = 0;
+		memcpy(&t, temp + i * 8, 8);
+		st[i] ^= t;
+	}
+	keccakF1600(st);
+
+	memcpy(output, st, 32);
+}
+
+static std::string eip55Checksum(const uint8_t addr20[20]) {
+	const std::string lower = toHex(addr20, 20);
+	uint8_t hashBytes[32];
+	keccak256(reinterpret_cast<const uint8_t *>(lower.data()), lower.size(), hashBytes);
+
+	std::string result = lower;
+	for (size_t i = 0; i < 40; ++i) {
+		if (result[i] >= 'a' && result[i] <= 'f') {
+			const uint8_t nibble = (i % 2 == 0) ? (hashBytes[i / 2] >> 4) : (hashBytes[i / 2] & 0x0F);
+			if (nibble >= 8) {
+				result[i] = static_cast<char>(result[i] - 'a' + 'A');
+			}
+		}
+	}
+	return result;
+}
+
+static bool checksumMatches(const std::string & checksummedAddress, const std::string & rawPattern) {
+	for (size_t i = 0; i < rawPattern.size() && i < checksummedAddress.size(); ++i) {
+		const char c = rawPattern[i];
+		if ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			if (checksummedAddress[i] != c) {
+				return false;
+			}
+		}
+	}
+	return true;
 }
 
 unsigned int getKernelExecutionTimeMicros(cl_event & e) {
@@ -183,7 +297,7 @@ Dispatcher::Device::Device(Dispatcher & parent, cl_context & clContext, cl_progr
 	m_memPointsDeltaX(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, size, true),
 	m_memInversedNegativeDoubleGy(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, size, true),
 	m_memPrevLambda(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS, size, true),
-	m_memResult(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_READ_ONLY, PROFANITY_MAX_SCORE + 1),
+	m_memResult(clContext, m_clQueue, CL_MEM_READ_WRITE | CL_MEM_HOST_READ_ONLY, mode.isMatchAll ? PROFANITY_MAX_RESULTS + 1 : PROFANITY_MAX_SCORE + 1),
 	m_memData1(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, 20),
 	m_memData2(clContext, m_clQueue, CL_MEM_READ_ONLY | CL_MEM_HOST_WRITE_ONLY, 20),
 	m_clSeed(createSeed()),
@@ -192,7 +306,8 @@ Dispatcher::Device::Device(Dispatcher & parent, cl_context & clContext, cl_progr
 	m_round(0),
 	m_speed(PROFANITY_SPEEDSAMPLES),
 	m_sizeInitialized(0),
-	m_eventFinished(NULL)
+	m_eventFinished(NULL),
+	m_lastTotalWritten(0)
 {
 
 }
@@ -201,7 +316,7 @@ Dispatcher::Device::~Device() {
 
 }
 
-Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const cl_uchar clScoreQuit, const std::string & seedPublicKey)
+Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const cl_uint clScoreQuit, const std::string & seedPublicKey, const bool checksumMode, const size_t checksumTarget, const std::string & rawPattern, const size_t checksumCount)
 	: m_clContext(clContext)
 	, m_clProgram(clProgram)
 	, m_mode(mode)
@@ -214,7 +329,15 @@ Dispatcher::Dispatcher(cl_context & clContext, cl_program & clProgram, const Mod
 	, m_countPrint(0)
 	, m_publicKeyX(fromHex(seedPublicKey.substr(0, 64)))
 	, m_publicKeyY(fromHex(seedPublicKey.substr(64, 64)))
+	, m_matchAllFound(0)
+	, m_checksumMode(checksumMode)
+	, m_checksumTarget(checksumTarget)
+	, m_checksumCount(checksumCount)
+	, m_rawPattern(rawPattern)
 {
+	if (m_checksumMode && m_checksumTarget > 0) {
+		m_collectedResults.reserve(m_checksumTarget);
+	}
 }
 
 Dispatcher::~Dispatcher() {
@@ -234,6 +357,20 @@ void Dispatcher::run() {
 
 	const auto timeInitialization = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - timeStart).count();
 	std::cout << "Initialization time: " << timeInitialization << " seconds" << std::endl;
+
+	if (m_mode.isMatchAll) {
+		auto mask    = toHex(m_mode.data1, 20);
+		auto pattern = toHex(m_mode.data2, 20);
+
+		for (size_t i = 0; i < mask.size(); ++i) {
+			if (mask[i] == '0') {
+				pattern[i] = '_';
+			}
+		}
+
+		std::cout << "Pattern: " << pattern << std::endl;
+		std::cout << std::endl;
+	}
 
 	m_quit = false;
 	m_countRunning = m_vDevices.size();
@@ -433,7 +570,73 @@ void Dispatcher::dispatch(Device & d) {
 	OpenCLException::throwIfError("failed to set custom callback", res);
 }
 
+void Dispatcher::drainResults(Device & d) {
+	const cl_uint totalWritten = d.m_memResult[0].found;
+	const cl_uint newCount = totalWritten - d.m_lastTotalWritten;
+
+	if (newCount == 0) {
+		return;
+	}
+
+	if (newCount > PROFANITY_MAX_RESULTS) {
+		std::cerr << std::endl << "warning: match-all buffer overflow, " << (newCount - PROFANITY_MAX_RESULTS) << " result(s) lost. Use a more specific pattern to avoid this." << std::endl;
+	}
+
+	const cl_uint toRead = std::min(newCount, (cl_uint) PROFANITY_MAX_RESULTS);
+	const cl_uint startWritePos = totalWritten - toRead;
+
+	if (m_checksumMode) {
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+
+			const size_t alreadyHave = m_collectedResults.size();
+			if (alreadyHave < m_checksumTarget) {
+				const size_t canAppend = m_checksumTarget - alreadyHave;
+				const cl_uint toAppend = static_cast<cl_uint>(std::min(static_cast<size_t>(toRead), canAppend));
+				const cl_long elapsed = static_cast<cl_long>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - timeStart).count());
+
+				for (cl_uint i = 0; i < toAppend; ++i) {
+					const cl_uint slot = ((startWritePos + i) % PROFANITY_MAX_RESULTS) + 1;
+					CollectedResult cr{};
+					cr.r = d.m_memResult[static_cast<int>(slot)];
+					cr.seed = d.m_clSeed;
+					cr.round = d.m_round;
+					cr.foundSeconds = elapsed;
+					m_collectedResults.push_back(cr);
+				}
+
+				if (m_collectedResults.size() >= m_checksumTarget) {
+					m_quit = true;
+				}
+			}
+		}
+
+		d.m_lastTotalWritten = totalWritten;
+	} else {
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+
+			for (cl_uint i = 0; i < toRead; ++i) {
+				const cl_uint slot = ((startWritePos + i) % PROFANITY_MAX_RESULTS) + 1;
+				printResult(d.m_clSeed, d.m_round, d.m_memResult[static_cast<int>(slot)], 0, timeStart, m_mode);
+			}
+
+			m_matchAllFound += newCount;
+			if (m_clScoreQuit && m_matchAllFound >= m_clScoreQuit) {
+				m_quit = true;
+			}
+		}
+
+		d.m_lastTotalWritten = totalWritten;
+	}
+}
+
 void Dispatcher::handleResult(Device & d) {
+	if (m_mode.isMatchAll) {
+		drainResults(d);
+		return;
+	}
+
 	for (auto i = PROFANITY_MAX_SCORE; i > m_clScoreMax; --i) {
 		result & r = d.m_memResult[i];
 
@@ -445,7 +648,7 @@ void Dispatcher::handleResult(Device & d) {
 			if (i >= m_clScoreMax) {
 				m_clScoreMax = i;
 
-				if (m_clScoreQuit && i >= m_clScoreQuit) {
+				if (m_clScoreQuit && (cl_uint)i >= m_clScoreQuit) {
 					m_quit = true;
 				}
 
@@ -502,9 +705,38 @@ void Dispatcher::printSpeed() {
 		}
 
 		const std::string strVT100ClearLine = "\33[2K\r";
-		std::cerr << strVT100ClearLine << "Total: " << formatSpeed(speedTotal) << " -" << strGPUs << '\r' << std::flush;
+		std::cerr << strVT100ClearLine << "Total: " << formatSpeed(speedTotal) << " -" << strGPUs;
+		if(m_checksumMode) {
+			std::cerr << " | Collected: " << m_collectedResults.size() << "/" << m_checksumTarget;
+		}
+		std::cerr << '\r' << std::flush;
 		m_countPrint = 0;
 	}
+}
+
+void Dispatcher::printChecksumResults() {
+	if (!m_checksumMode) {
+		return;
+	}
+
+	size_t found = 0;
+
+	for (const auto & cr : m_collectedResults) {
+		const std::string checksummed = eip55Checksum(cr.r.foundHash);
+
+		if (!checksumMatches(checksummed, m_rawPattern)) {
+			continue;
+		}
+
+		const std::string strPrivate = formatPrivateKey(cr.seed, cr.round, cr.r.foundId);
+
+		const std::string strVT100ClearLine = "\33[2K\r";
+		std::cout << strVT100ClearLine << "  Time: " << std::setw(5) << cr.foundSeconds << "s Private: 0x" << strPrivate << ' ' << m_mode.transformName() << ": 0x" << checksummed << std::endl;
+
+		++found;
+	}
+
+	std::cout << "Found " << found << " of " << m_checksumCount << " addresses with matching checksum" << std::endl;
 }
 
 void CL_CALLBACK Dispatcher::staticCallback(cl_event event, cl_int event_command_exec_status, void * user_data) {

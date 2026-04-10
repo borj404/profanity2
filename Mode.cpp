@@ -1,7 +1,7 @@
 #include "Mode.hpp"
 #include <stdexcept>
 
-Mode::Mode() : score(0) {
+Mode::Mode() : score(0), isMatchAll(false) {
 
 }
 
@@ -63,6 +63,25 @@ Mode Mode::matching(const std::string strHex) {
 		++index;
 	}
 
+	return r;
+}
+
+Mode Mode::matchAll(const std::string strHex) {
+	Mode r = matching(strHex);
+
+	int constrainedNibbles = 0;
+	for (unsigned char i : r.data1) {
+		if (i & 0xF0) ++constrainedNibbles;
+		if (i & 0x0F) ++constrainedNibbles;
+	}
+
+	if (constrainedNibbles < 6) {
+		throw std::runtime_error("--match-all pattern too permissive: constrain at least 6 nibbles to prevent ring buffer overflow. For shorter patterns use --matching instead.");
+	}
+
+	r.name = "match-all";
+	r.kernel = "profanity_match_all";
+	r.isMatchAll = true;
 	return r;
 }
 

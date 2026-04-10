@@ -137,7 +137,7 @@ bool printResult(const cl_int err) {
 
 std::string getDeviceCacheFilename(cl_device_id & d, const size_t & inverseSize) {
 	const auto uniqueId = getUniqueDeviceIdentifier(d);
-	return "cache-opencl." + toString(inverseSize) + "." + toString(uniqueId);
+	return "cache-opencl." + toString(inverseSize) + "." + toString(PROFANITY_MAX_RESULTS) + "." + toString(uniqueId);
 }
 
 int main(int argc, char * * argv) {
@@ -156,6 +156,7 @@ int main(int argc, char * * argv) {
 		bool bModeNumbers = false;
 		std::string strModeLeading;
 		std::string strModeMatching;
+		std::string strModeMatchAll;
 		std::string strPublicKey;
 		bool bModeLeadingRange = false;
 		bool bModeRange = false;
@@ -170,6 +171,8 @@ int main(int argc, char * * argv) {
 		size_t inverseSize = 255;
 		size_t inverseMultiple = 16384;
 		bool bMineContract = false;
+		int quitCount = 0;
+		int checksumCount = -1;
 
 		argp.addSwitch('h', "help", bHelp);
 		argp.addSwitch('0', "benchmark", bModeBenchmark);
@@ -193,6 +196,9 @@ int main(int argc, char * * argv) {
 		argp.addSwitch('c', "contract", bMineContract);
 		argp.addSwitch('z', "publicKey", strPublicKey);
 		argp.addSwitch('b', "zero-bytes", bModeZeroBytes);
+		argp.addSwitch('\0', "match-all", strModeMatchAll);
+		argp.addSwitch('\0', "checksum", checksumCount);
+		argp.addSwitch('q', "quit-score", quitCount);
 
 		if (!argp.parse()) {
 			std::cout << "error: bad arguments, try again :<" << std::endl;
@@ -202,6 +208,34 @@ int main(int argc, char * * argv) {
 		if (bHelp) {
 			std::cout << g_strHelp << std::endl;
 			return 0;
+		}
+
+		if (quitCount < 0) {
+			std::cout << "error: quit count must be 0 or greater" << std::endl;
+			return 1;
+		}
+
+		if (checksumCount != -1 && checksumCount < 1) {
+			std::cout << "error: --checksum requires a positive integer (use --checksum N where N >= 1)" << std::endl;
+			return 1;
+		}
+
+		if (!strModeMatching.empty()) {
+			const size_t sepPos = strModeMatching.find('_');
+			if (sepPos != std::string::npos && strModeMatching.size() < 40) {
+				const std::string prefix = strModeMatching.substr(0, sepPos);
+				const std::string suffix = strModeMatching.substr(sepPos + 1);
+				strModeMatching = prefix + std::string(40 - prefix.size() - suffix.size(), 'X') + suffix;
+			}
+		}
+
+		if (!strModeMatchAll.empty()) {
+			const size_t sepPos = strModeMatchAll.find('_');
+			if (sepPos != std::string::npos && strModeMatchAll.size() < 40) {
+				const std::string prefix = strModeMatchAll.substr(0, sepPos);
+				const std::string suffix = strModeMatchAll.substr(sepPos + 1);
+				strModeMatchAll = prefix + std::string(40 - prefix.size() - suffix.size(), 'X') + suffix;
+			}
 		}
 
 		Mode mode = Mode::benchmark();
@@ -217,6 +251,8 @@ int main(int argc, char * * argv) {
 			mode = Mode::leading(strModeLeading.front());
 		} else if (!strModeMatching.empty()) {
 			mode = Mode::matching(strModeMatching);
+		} else if (!strModeMatchAll.empty()) {
+			mode = Mode::matchAll(strModeMatchAll);
 		} else if (bModeLeadingRange) {
 			mode = Mode::leadingRange(rangeMin, rangeMax);
 		} else if (bModeRange) {
@@ -231,14 +267,50 @@ int main(int argc, char * * argv) {
 			std::cout << g_strHelp << std::endl;
 			return 0;
 		}
-		
-		if (strPublicKey.length() == 0) {
-			std::cout << "error: this tool requires your public key to derive it's private key security" << std::endl;
-			return 1;
+
+		bool checksumActive = (checksumCount > 0);
+		size_t checksumCollectionTarget = 0;
+
+		if (checksumActive) {
+			if (!mode.isMatchAll) {
+				std::cout << "error: --checksum requires --match-all" << std::endl;
+				return 1;
+			}
+
+			int letterCount = 0;
+			for (char c : strModeMatchAll) {
+				if ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+					++letterCount;
+				}
+			}
+
+			if (letterCount == 0) {
+				std::cout << "warning: pattern has no hex letters, EIP-55 filtering has no effect" << std::endl;
+			}
+
+			// Each hex letter has a 50% chance of matching its EIP-55 capitalization, so a pattern
+			// with L letters passes the checksum filter with probability (1/2)^L.
+			// Collecting N * 2^L candidates gives only a ~50-63% chance of getting N results.
+			// A 4x margin keeps the failure probability below 2% for all N >= 1 (worst case is N=1,
+			// where it equals e^(-4) ~= 1.8%).
+			// See: https://www.itl.nist.gov/div898/handbook/eda/section3/eda366j.htm
+			checksumCollectionTarget = static_cast<size_t>(checksumCount) * ((size_t)1 << letterCount) * 4;
+
+			const size_t kCollectionCap = 1000000;
+			if (checksumCollectionTarget > kCollectionCap) {
+				std::cout << "error: checksum collection target " << checksumCollectionTarget << " exceeds limit of " << kCollectionCap << ", reduce --checksum N or use a more specific pattern" << std::endl;
+				return 1;
+			}
+
+			quitCount = 0;
+		}
+
+		if (strPublicKey.length() == 130 && strPublicKey[0] == '0' && strPublicKey[1] == '4') {
+			strPublicKey = strPublicKey.substr(2);
 		}
 
 		if (strPublicKey.length() != 128) {
-			std::cout << "error: public key must be 128 hexademical characters long" << std::endl;
+			std::cout << "error: public key must be 128 hexadecimal characters long" << std::endl;
 			return 1;
 		}
 
@@ -333,7 +405,7 @@ int main(int argc, char * * argv) {
 
 		// Build the program
 		std::cout << "  Building program..." << std::flush;
-		const std::string strBuildOptions = "-D PROFANITY_INVERSE_SIZE=" + toString(inverseSize) + " -D PROFANITY_MAX_SCORE=" + toString(PROFANITY_MAX_SCORE);
+		const std::string strBuildOptions = "-D PROFANITY_INVERSE_SIZE=" + toString(inverseSize) + " -D PROFANITY_MAX_SCORE=" + toString(PROFANITY_MAX_SCORE) + " -D PROFANITY_MAX_RESULTS=" + toString(PROFANITY_MAX_RESULTS);
 		if (printResult(clBuildProgram(clProgram, vDevices.size(), vDevices.data(), strBuildOptions.c_str(), NULL, NULL))) {
 #ifdef PROFANITY_DEBUG
 			std::cout << std::endl;
@@ -363,12 +435,17 @@ int main(int argc, char * * argv) {
 
 		std::cout << std::endl;
 
-		Dispatcher d(clContext, clProgram, mode, worksizeMax == 0 ? inverseSize * inverseMultiple : worksizeMax, inverseSize, inverseMultiple, 0, strPublicKey);
+		Dispatcher d(clContext, clProgram, mode, worksizeMax == 0 ? inverseSize * inverseMultiple : worksizeMax, inverseSize, inverseMultiple, static_cast<cl_uint>(quitCount), strPublicKey, checksumActive, checksumCollectionTarget, strModeMatchAll, static_cast<size_t>(checksumActive ? checksumCount : 0));
 		for (auto & i : vDevices) {
 			d.addDevice(i, worksizeLocal, mDeviceIndex[i]);
 		}
 
 		d.run();
+
+		if (checksumActive) {
+			d.printChecksumResults();
+		}
+
 		clReleaseContext(clContext);
 		return 0;
 	} catch (std::runtime_error & e) {

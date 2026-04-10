@@ -9,6 +9,7 @@ usage: ./profanity2 [OPTIONS]
   Mandatory args:
     -z                      Seed public key to start, add it's private key
                             to the "profanity2" resulting private key.
+                            The 04 prefix is stripped automatically if present.
 
   Basic modes:
     --benchmark             Run without any scoring, a benchmark.
@@ -20,8 +21,11 @@ usage: ./profanity2 [OPTIONS]
     -b, --zero-bytes        Score on hashes containing the most zero bytes
 
   Modes with arguments:
-    --leading <single hex>  Score on hashes leading with given hex character.
-    --matching <hex string> Score on hashes matching given hex string.
+    --leading <single hex>   Score on hashes leading with given hex character.
+    --matching <hex string>  Score on hashes matching given hex string.
+    --match-all <hex string> Output all addresses satisfying the given hex string.
+    --checksum <N>           Requires --match-all. Filters results by EIP-55 checksum
+                             capitalization. Targets at least N results (N >= 1).
 
   Advanced modes:
     --contract              Instead of account address, score the contract
@@ -46,11 +50,18 @@ usage: ./profanity2 [OPTIONS]
                             work item. [default = 255]
     -I, --inverse-multiple  Set how many above work items will run in
                             parallell. [default = 16384]
+    -q, --quit-score <N>    In score modes: quit when score reaches N.
+                            In --match-all: quit after N addresses found.
+                            [default = 0 (off), ignored with --checksum]
 
   Examples:
     ./profanity2 --leading f -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --matching dead -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --matching badXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXbad -z HEX_PUBLIC_KEY_128_CHARS_LONG
+    ./profanity2 --match-all 1337XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXC0DE -z HEX_PUBLIC_KEY_128_CHARS_LONG
+    ./profanity2 --match-all 1337_C0DE -q 5 -z HEX_PUBLIC_KEY_128_CHARS_LONG
+    ./profanity2 --match-all C0FFEE --checksum 10 -z HEX_PUBLIC_KEY_128_CHARS_LONG
+    ./profanity2 --match-all _C0FFEE --checksum 3 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --leading-range -m 0 -M 1 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --leading-range -m 10 -M 12 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --range -m 0 -M 1 -z HEX_PUBLIC_KEY_128_CHARS_LONG
@@ -59,6 +70,13 @@ usage: ./profanity2 [OPTIONS]
   About:
     profanity2 is a vanity address generator for Ethereum that utilizes
     computing power from GPUs using OpenCL.
+
+  Forked "profanity2" (this fork):
+    Author: borj404 <borj404@proton.me>
+    Disclaimer:
+      Added --match-all mode for streaming all matching addresses
+      and --checksum for EIP-55 capitalization filtering.
+      No cryptographic logic or safety mechanisms from profanity2 were modified.
 
   Forked "profanity2":
     Author: 1inch Network <info@1inch.io>

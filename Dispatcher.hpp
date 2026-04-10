@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <chrono>
 
 #if defined(__APPLE__) || defined(__MACOSX)
 #include <OpenCL/cl.h>
@@ -21,6 +22,14 @@
 
 #define PROFANITY_SPEEDSAMPLES 20
 #define PROFANITY_MAX_SCORE 40
+#define PROFANITY_MAX_RESULTS 256
+
+struct CollectedResult {
+	result r;
+	cl_ulong4 seed;
+	cl_ulong round;
+	cl_long foundSeconds;
+};
 
 class Dispatcher {
 	private:
@@ -77,14 +86,18 @@ class Dispatcher {
 			// Initialization
 			size_t m_sizeInitialized;
 			cl_event m_eventFinished;
+
+			// GPU write counter value at end of previous drain (match-all mode)
+			cl_uint m_lastTotalWritten;
 		};
 
 	public:
-		Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const cl_uchar clScoreQuit, const std::string & seedPublicKey);
+		Dispatcher(cl_context & clContext, cl_program & clProgram, const Mode mode, const size_t worksizeMax, const size_t inverseSize, const size_t inverseMultiple, const cl_uint clScoreQuit, const std::string & seedPublicKey, const bool checksumMode = false, const size_t checksumTarget = 0, const std::string & rawPattern = "", const size_t checksumCount = 0);
 		~Dispatcher();
 
 		void addDevice(cl_device_id clDeviceId, const size_t worksizeLocal, const size_t index);
 		void run();
+		void printChecksumResults();
 
 	private:
 		void init();
@@ -96,7 +109,7 @@ class Dispatcher {
 		void enqueueKernelDevice(Device & d, cl_kernel & clKernel, size_t worksizeGlobal, cl_event * pEvent);
 
 		void handleResult(Device & d);
-		void randomizeSeed(Device & d);
+		void drainResults(Device & d);
 
 		void onEvent(cl_event event, cl_int status, Device & d);
 
@@ -115,7 +128,7 @@ class Dispatcher {
 		const size_t m_inverseSize;
 		const size_t m_size;
 		cl_uchar m_clScoreMax;
-		cl_uchar m_clScoreQuit;
+		cl_uint m_clScoreQuit;
 
 		std::vector<Device *> m_vDevices;
 
@@ -131,6 +144,12 @@ class Dispatcher {
 		bool m_quit;
 		cl_ulong4 m_publicKeyX;
 		cl_ulong4 m_publicKeyY;
+		cl_uint m_matchAllFound;
+		bool m_checksumMode;
+		size_t m_checksumTarget;
+		size_t m_checksumCount;
+		std::string m_rawPattern;
+		std::vector<CollectedResult> m_collectedResults;
 };
 
 #endif /* HPP_DISPATCHER */

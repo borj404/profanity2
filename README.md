@@ -4,6 +4,8 @@ Profanity is a high performance (probably the fastest!) vanity address generator
 
 ![Screenshot](/img/screenshot.png?raw=true "Wow! That's a lot of zeros!")
 
+This fork adds `--match-all` to stream every address matching a hex pattern, and `--checksum` to filter results by EIP-55 capitalization.
+
 # Important to know
 
 A previous version of this project has a known critical issue due to a bad source of randomness. The issue enables attackers to recover private key from public key: https://blog.1inch.io/a-vulnerability-disclosed-in-profanity-an-ethereum-vanity-address-tool
@@ -25,6 +27,17 @@ $ openssl ec -inform DER -text -noout -in <(cat <(echo -n "302e0201010420") <(ec
 ```
 
 ## Adding private keys (never use online calculators!)
+
+### add_keys.py (recommended)
+
+Use the included `add_keys.py` script to generate the final private key and derive the Ethereum address:
+```bash
+python3 add_keys.py
+```
+
+Best run this on an air-gapped machine.
+
+Requires Python 3.6+, no external dependencies.
 
 ### Terminal:
 
@@ -48,6 +61,7 @@ usage: ./profanity2 [OPTIONS]
   Mandatory args:
     -z                      Seed public key to start, add it's private key
                             to the "profanity2" resulting private key.
+                            The 04 prefix is stripped automatically if present.
 
   Basic modes:
     --benchmark             Run without any scoring, a benchmark.
@@ -59,8 +73,11 @@ usage: ./profanity2 [OPTIONS]
     -b, --zero-bytes        Score on hashes containing the most zero bytes
 
   Modes with arguments:
-    --leading <single hex>  Score on hashes leading with given hex character.
-    --matching <hex string> Score on hashes matching given hex string.
+    --leading <single hex>   Score on hashes leading with given hex character.
+    --matching <hex string>  Score on hashes matching given hex string.
+    --match-all <hex string> Output all addresses satisfying the given hex string.
+    --checksum <N>           Requires --match-all. Filters results by EIP-55 checksum
+                             capitalization. Targets at least N results (N >= 1).
 
   Advanced modes:
     --contract              Instead of account address, score the contract
@@ -85,11 +102,18 @@ usage: ./profanity2 [OPTIONS]
                             work item. [default = 255]
     -I, --inverse-multiple  Set how many above work items will run in
                             parallell. [default = 16384]
+    -q, --quit-score <N>    In score modes: quit when score reaches N.
+                            In --match-all: quit after N addresses found.
+                            [default = 0 (off), ignored with --checksum]
 
   Examples:
     ./profanity2 --leading f -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --matching dead -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --matching badXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXbad -z HEX_PUBLIC_KEY_128_CHARS_LONG
+    ./profanity2 --match-all 1337XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXC0DE -z HEX_PUBLIC_KEY_128_CHARS_LONG
+    ./profanity2 --match-all 1337_C0DE -q 5 -z HEX_PUBLIC_KEY_128_CHARS_LONG
+    ./profanity2 --match-all C0FFEE --checksum 10 -z HEX_PUBLIC_KEY_128_CHARS_LONG
+    ./profanity2 --match-all _C0FFEE --checksum 3 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --leading-range -m 0 -M 1 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --leading-range -m 10 -M 12 -z HEX_PUBLIC_KEY_128_CHARS_LONG
     ./profanity2 --range -m 0 -M 1 -z HEX_PUBLIC_KEY_128_CHARS_LONG
@@ -99,6 +123,13 @@ usage: ./profanity2 [OPTIONS]
   About:
     profanity2 is a vanity address generator for Ethereum that utilizes
     computing power from GPUs using OpenCL.
+
+  Forked "profanity2" (this fork):
+    Author: borj404 <borj404@proton.me>
+    Disclaimer:
+      Added --match-all mode for streaming all matching addresses
+      and --checksum for EIP-55 capitalization filtering.
+      No cryptographic logic or safety mechanisms from profanity2 were modified.
 
   Forked "profanity2":
     Author: 1inch Network <info@1inch.io>
@@ -116,6 +147,35 @@ usage: ./profanity2 [OPTIONS]
       program like any software might contain bugs and it does by design cut
       corners to improve overall performance.
 ```
+
+## Pattern shorthand for `--matching` and `--match-all`
+
+Instead of typing a full 40-char pattern, use `_` as a fill separator in both `--matching` and `--match-all`:
+
+| Input | Equivalent |
+|:------|:-----------|
+| `C0FFEE` | `C0FFEEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX` (prefix) |
+| `_C0FFEE` | `XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXC0FFEE` (suffix) |
+| `1337_C0DE` | `1337XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXC0DE` (prefix+suffix) |
+
+Full 40-char patterns are passed through unchanged. Both `X` and `_` act as wildcards.
+
+## EIP-55 checksum filtering (`--checksum`)
+
+Each hex letter in the pattern has a 50% chance of matching its EIP-55 capitalization. For a pattern with N hex letters the probability per address is `(1/2)^N`.
+
+The GPU collects raw matching addresses case-insensitively, then the CPU applies EIP-55 checksum to each candidate and keeps only those where the letter casing matches the pattern exactly.
+
+| Hex letters | Probability | Internal target for `--checksum 1` |
+|:-----------:|:-----------:|:----------------------------------:|
+| 1 | 50% | 8 |
+| 3 | 12.5% | 32 |
+| 5 | ~3.1% | 128 |
+| 6 | ~1.6% | 256 |
+| 8 | ~0.4% | 1024 |
+| 10 | ~0.1% | 4096 |
+
+Pattern capitalization matters: `C0FFEE` finds addresses where those letters are uppercase in their EIP-55 checksum; `c0ffee` finds lowercase.
 
 ### Benchmarks - Current version
 |Model|Clock Speed|Memory Speed|Modified straps|Speed|Time to match eight characters

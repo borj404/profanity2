@@ -34,6 +34,33 @@
  * =========
  *
  *
+ * Match-all mode
+ * ==============
+ * This mode is an alternative to the score-based kernels for cases where you
+ * want every address satisfying a given hex mask, streaming results as they're
+ * found rather than reporting only the single best one. It's selected by the
+ * --match-all flag and bypasses the score system entirely
+ * (profanity_result_update only keeps the first result per score level).
+ *
+ * Instead, every match is written into a circular buffer backed by a larger
+ * pResult allocation than the score kernels use. Slot 0 of pResult serves as
+ * a write counter (pResult[0].found); each matching work item increments it
+ * to claim a unique position and maps that to a result slot:
+ *
+ *   slot = (writePos % PROFANITY_MAX_RESULTS) + 1
+ *
+ * The host snapshots the write counter per device (m_lastTotalWritten) and
+ * each dispatch round drains however many new entries have been written since
+ * the last check.
+ *
+ * Unlike profanity_score_matching which always walks all 20 bytes, this
+ * kernel returns immediately on the first byte that fails the mask check,
+ * so most work items exit on the very first constrained byte.
+ *
+ * The scoreMax argument is intentionally unused; it's kept only to give all
+ * score kernels a uniform signature so the host dispatch machinery doesn't
+ * need to change.
+ *
  * TODO
  * ====
  *   * Update comments to reflect new optimizations and structure
@@ -487,8 +514,14 @@ __kernel void profanity_init(__global const point * const precomp, __global mp_n
 	pDeltaX[id] = p.x;
 	pPrevLambda[id] = tmp1;
 
-	for (uchar i = 0; i < PROFANITY_MAX_SCORE + 1; ++i) {
-		pResult[i].found = 0;
+	// Only id==0 zeros the result slots; profanity_init is always dispatched
+	// from offset 0 so id==0 is guaranteed to be present.
+	// Match-all slots above PROFANITY_MAX_SCORE are written before they're read,
+	// so only PROFANITY_MAX_SCORE+1 slots need zeroing.
+	if (id == 0) {
+		for (uint i = 0; i < PROFANITY_MAX_SCORE + 1; ++i) {
+			pResult[i].found = 0;
+		}
 	}
 }
 
@@ -868,4 +901,28 @@ __kernel void profanity_score_doubles(__global mp_number * const pInverse, __glo
 	}
 
 	profanity_result_update(id, hash, pResult, score, scoreMax);
+}
+
+// Collects all matching addresses into a circular buffer instead of calling
+// profanity_result_update, which only keeps the first result per score level.
+// See the "Match-all mode" section at the top of this file for details.
+__kernel void profanity_match_all(__global mp_number * const pInverse, __global result * const pResult, __constant const uchar * const data1, __constant const uchar * const data2, const uchar scoreMax) {
+	const size_t id = get_global_id(0);
+	__global const uchar * const hash = (__global const uchar * const) pInverse[id].d;
+
+	for (int i = 0; i < 20; ++i) {
+		if (data1[i] > 0 && (hash[i] & data1[i]) != data2[i]) {
+			return;
+		}
+	}
+
+	const uint writePos = atomic_inc((__global volatile uint *)&pResult[0].found);
+	const uint slot     = (writePos % PROFANITY_MAX_RESULTS) + 1;
+
+	pResult[slot].found   = 1;
+	pResult[slot].foundId = (uint) id;
+
+	for (int i = 0; i < 20; ++i) {
+		pResult[slot].foundHash[i] = hash[i];
+	}
 }
